@@ -14,7 +14,7 @@ langchain-google-genai==2.0.5
 langchain-text-splitters==0.3.2
 
 # Vector store for RAG (in-memory, temporary per-session)
-faiss-cpu==1.14.3
+faiss-cpu>=1.7.4
 
 # Real-time web search for product data / price comparison
 tavily-python==0.5.0
