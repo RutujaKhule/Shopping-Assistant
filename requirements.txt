@@ -1,0 +1,38 @@
+# =========================================================
+# Multimodal AI Shopping Assistant — requirements.txt
+# =========================================================
+# Core app framework
+streamlit==1.59.0
+
+# Google Gemini (Vision + Flash text generation)
+google-generativeai==0.8.3
+
+# LangChain core + integrations for RAG orchestration
+langchain==0.3.7
+langchain-community==0.3.7
+langchain-google-genai==2.0.5
+langchain-text-splitters==0.3.2
+
+# Vector store for RAG (in-memory, temporary per-session)
+faiss-cpu==1.9.0
+
+# Real-time web search for product data / price comparison
+tavily-python==0.5.0
+
+# Environment variable management
+python-dotenv==1.0.1
+
+# Data handling for price comparison tables
+pandas==2.2.3
+
+# HTTP requests (used by search/comparison services)
+requests==2.32.3
+
+# HTML parsing fallback (only used if a source needs direct scraping)
+beautifulsoup4==4.12.3
+
+# Image handling (product image upload/preprocessing)
+Pillow==10.4.0
+
+# Numerical ops backing FAISS/embeddings
+numpy==1.26.4

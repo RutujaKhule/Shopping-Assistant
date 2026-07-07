@@ -1,0 +1,24 @@
+# Environment secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# FAISS temp indices (session-based, should not persist in repo)
+*.faiss
+*.pkl
+/rag/index_store/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
