@@ -3,11 +3,7 @@ services/search.py
 =========================================================
 Real-Time Search Service (Tavily)
 =========================================================
-This module is the app's only source of "ground truth" product data.
-Every spec, price, and review snippet is fetched live from the web via the
-Tavily Search API.
-
-Modified to dynamically fetch TAVILY_API_KEY from Streamlit Secrets at runtime.
+Modified with lazy initialization to prevent crashes during import on Streamlit Cloud.
 """
 
 import os
@@ -22,10 +18,6 @@ import streamlit as st
 
 from utils import build_manual_search_query, filter_accessory_results
 
-# -------------------------------------------------------
-# Setup
-# -------------------------------------------------------
-
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -33,7 +25,6 @@ logging.basicConfig(level=logging.INFO)
 
 MAX_SEARCH_RESULTS = int(os.getenv("MAX_SEARCH_RESULTS", "8"))
 
-# Retailers we check for real-time price comparison
 RETAILER_DOMAINS: Dict[str, List[str]] = {
     "Amazon India": ["amazon.in"],
     "Flipkart": ["flipkart.com"],
@@ -42,10 +33,7 @@ RETAILER_DOMAINS: Dict[str, List[str]] = {
     "Vijay Sales": ["vijaysales.com"],
 }
 
-# Cap on parallel worker threads for any batch of Tavily calls.
 MAX_PARALLEL_WORKERS = 5
-
-# Cap on how many (query -> results) pairs we keep in the in-memory cache.
 MAX_CACHE_ENTRIES = 256
 
 
@@ -104,29 +92,21 @@ class ProductSearchBundle:
 
 
 class SearchService:
-    """
-    Wrapper around the Tavily Search API for all real-time product
-    research needs of the app.
-    """
+    """Wrapper around the Tavily Search API for all real-time product research."""
 
     def __init__(self, max_results: int = MAX_SEARCH_RESULTS) -> None:
-        self._ensure_api_key()
+        # Removed _ensure_api_key from here to prevent import-time exceptions
         self.max_results = max_results
         self._cache: Dict[Tuple[str, Tuple[str, ...], int], List[SearchResult]] = {}
 
-    @staticmethod
-    def _ensure_api_key() -> None:
-        """Fail fast with a clear message if no API key is configured at runtime."""
+    def _ensure_api_key(self) -> None:
+        """Fail fast only when a search is actively performed."""
         api_key = get_tavily_api_key()
         if not api_key or api_key == "your_tavily_api_key_here":
             raise SearchServiceError(
                 "TAVILY_API_KEY is missing or unset. Add a valid key to "
                 "your Streamlit Secrets or .env file before using SearchService."
             )
-
-    # -----------------------------------------------------
-    # Low-level search primitive
-    # -----------------------------------------------------
 
     def _cache_key(
         self, query: str, max_results: int, include_domains: Optional[List[str]]
@@ -165,7 +145,7 @@ class SearchService:
 
         try:
             response = requests.post(
-                "https://api.tavily.com/search",
+                "[https://api.tavily.com/search](https://api.tavily.com/search)",
                 json=payload,
                 timeout=15,
             )
@@ -195,21 +175,12 @@ class SearchService:
 
         return results
 
-    # -----------------------------------------------------
-    # FEATURE 2: Real-time price comparison across retailers
-    # -----------------------------------------------------
-
-    def search_prices_by_retailer(
-        self, product_query: str
-    ) -> Dict[str, List[SearchResult]]:
-        """Search each configured retailer individually in parallel."""
+    def search_prices_by_retailer(self, product_query: str) -> Dict[str, List[SearchResult]]:
         prices: Dict[str, List[SearchResult]] = {}
 
         def _search_retailer(retailer: str, domains: List[str]) -> Tuple[str, List[SearchResult]]:
             try:
-                results = self._search(
-                    product_query, max_results=3, include_domains=domains
-                )
+                results = self._search(product_query, max_results=3, include_domains=domains)
                 for r in results:
                     r.source = retailer
                 return retailer, results
@@ -218,22 +189,14 @@ class SearchService:
                 return retailer, []
 
         with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_WORKERS, len(RETAILER_DOMAINS))) as executor:
-            futures = [
-                executor.submit(_search_retailer, retailer, domains)
-                for retailer, domains in RETAILER_DOMAINS.items()
-            ]
+            futures = [executor.submit(_search_retailer, retailer, domains) for retailer, domains in RETAILER_DOMAINS.items()]
             for future in as_completed(futures):
                 retailer, results = future.result()
                 prices[retailer] = results
 
         return prices
 
-    # -----------------------------------------------------
-    # FEATURE 7: Review discovery
-    # -----------------------------------------------------
-
     def search_reviews(self, product_query: str) -> List[SearchResult]:
-        """Search for real customer reviews and expert opinions across the web."""
         queries = [
             f"{product_query} customer reviews",
             f"{product_query} pros cons",
@@ -261,14 +224,7 @@ class SearchService:
 
         return all_results
 
-    # -----------------------------------------------------
-    # FEATURE 4 & 5: Similar products / budget alternatives
-    # -----------------------------------------------------
-
-    def search_similar_products(
-        self, product_query: str, category: Optional[str] = None
-    ) -> List[SearchResult]:
-        """Legacy similar-products search, kept as a safety-net fallback."""
+    def search_similar_products(self, product_query: str, category: Optional[str] = None) -> List[SearchResult]:
         category_hint = f" {category}" if category else ""
         query = f"best alternatives to {product_query}{category_hint} 2026"
         results = self._search(query)
@@ -276,12 +232,7 @@ class SearchService:
             r.source = "similar_products"
         return results
 
-    def search_similar_products_by_suggestions(
-        self,
-        suggestions: List[Dict[str, str]],
-        category: Optional[str] = None,
-    ) -> List[SearchResult]:
-        """Search the live web for each Gemini-suggested similar product individually."""
+    def search_similar_products_by_suggestions(self, suggestions: List[Dict[str, str]], category: Optional[str] = None) -> List[SearchResult]:
         if not suggestions:
             return []
 
@@ -317,37 +268,22 @@ class SearchService:
 
         return found
 
-    def search_budget_alternatives(
-        self, category: str, max_price_inr: int
-    ) -> List[SearchResult]:
-        """Search for budget-friendly alternatives under a given price cap."""
+    def search_budget_alternatives(self, category: str, max_price_inr: int) -> List[SearchResult]:
         query = f"best {category} under {max_price_inr} rupees 2026"
         results = self._search(query)
         for r in results:
             r.source = "budget_alternatives"
         return results
 
-    # -----------------------------------------------------
-    # High-level orchestrator: build everything at once
-    # -----------------------------------------------------
-
     def search_product_details(self, product_query: str) -> List[SearchResult]:
-        """Search product specifications, features, price and overview."""
         query = f"{product_query} specifications features price"
-        results = self._search(
-            query=query,
-            max_results=5,
-        )
+        results = self._search(query=query, max_results=5)
         for r in results:
             r.source = "general"
         return results
 
-    def build_product_bundle(
-        self, product_query: str, category: Optional[str] = None
-    ) -> ProductSearchBundle:
-        """Run all searches needed to fully populate the bundle data."""
+    def build_product_bundle(self, product_query: str, category: Optional[str] = None) -> ProductSearchBundle:
         logger.info("Building product search bundle for: %s", product_query)
-
         bundle = ProductSearchBundle(product_name=product_query)
 
         with ThreadPoolExecutor(max_workers=3) as executor:
@@ -360,5 +296,4 @@ class SearchService:
             bundle.reviews = future_reviews.result()
 
         bundle.similar_products = self.search_similar_products(product_query, category)
-
         return bundle
