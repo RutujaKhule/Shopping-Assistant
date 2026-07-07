@@ -33,7 +33,6 @@ if "GOOGLE_API_KEY" in st.secrets:
 if "TAVILY_API_KEY" in st.secrets:
     os.environ["TAVILY_API_KEY"] = st.secrets["TAVILY_API_KEY"]
 
-ीं
 google_key = os.environ.get("GOOGLE_API_KEY")
 tavily_key = os.environ.get("TAVILY_API_KEY")
 
