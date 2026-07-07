@@ -4,35 +4,10 @@ services/search.py
 Real-Time Search Service (Tavily)
 =========================================================
 This module is the app's only source of "ground truth" product data.
-Per project requirements, NOTHING here is static or hardcoded — every
-spec, price, and review snippet is fetched live from the web via the
+Every spec, price, and review snippet is fetched live from the web via the
 Tavily Search API.
 
-Responsibilities:
-1. General product research      -> specs, features, availability
-2. Retailer-specific price search -> Amazon India, Flipkart, Croma,
-                                      Reliance Digital, Vijay Sales
-3. Review discovery               -> real customer opinions from the web
-4. Similar / budget alternative discovery
-
-Quality & performance improvements:
-- Every result returned by `_search()` is filtered through
-  `utils.filter_accessory_results()`, so accessory listings (covers,
-  cases, chargers, cables, etc.) never leak into the app, no matter
-  which higher-level method is calling it.
-- Retailer price search stays domain-restricted via `include_domains`
-  (more reliable than a bare "site:" query string) and now uses a
-  short, product-first query instead of noisy filler words.
-- Independent Tavily calls (general info / retailer prices / reviews,
-  and each retailer within the price search) are run in parallel with
-  a thread pool, since they don't depend on each other.
-- Identical queries are cached in-memory for the lifetime of this
-  service instance, so repeated chat questions don't re-hit Tavily for
-  data we already fetched.
-
-All results are returned as `SearchResult` objects and can be flattened
-into plain text via `to_corpus_text()` for embedding in
-services/embeddings.py + rag/vector_store.py.
+Modified to dynamically fetch TAVILY_API_KEY from Streamlit Secrets at runtime.
 """
 
 import os
@@ -43,6 +18,7 @@ from typing import Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 import requests
+import streamlit as st
 
 from utils import build_manual_search_query, filter_accessory_results
 
@@ -55,16 +31,9 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 MAX_SEARCH_RESULTS = int(os.getenv("MAX_SEARCH_RESULTS", "8"))
 
-# Retailers we check for real-time price comparison (Feature 2).
-# Mapped to the domains Tavily should restrict its search to, so results
-# are guaranteed to come from the retailer itself rather than aggregators.
-# We rely on `include_domains` (rather than a "site:" string in the query
-# text) because Tavily's own domain filter is the reliable way to pin
-# results to a specific retailer - "site:" operators are a search-engine
-# convention that Tavily's query text does not consistently honor.
+# Retailers we check for real-time price comparison
 RETAILER_DOMAINS: Dict[str, List[str]] = {
     "Amazon India": ["amazon.in"],
     "Flipkart": ["flipkart.com"],
@@ -80,6 +49,11 @@ MAX_PARALLEL_WORKERS = 5
 MAX_CACHE_ENTRIES = 256
 
 
+def get_tavily_api_key() -> Optional[str]:
+    """Dynamically fetches TAVILY_API_KEY from Streamlit Secrets or environment variables."""
+    return st.secrets.get("TAVILY_API_KEY") or os.getenv("TAVILY_API_KEY")
+
+
 class SearchServiceError(Exception):
     """Raised when a search call fails or returns no usable results."""
     pass
@@ -92,7 +66,7 @@ class SearchResult:
     url: str
     content: str
     score: float = 0.0
-    source: str = "web"  # e.g. "Flipkart", "reviews", "general"
+    source: str = "web"
 
     def to_text(self) -> str:
         """Render this result as a labeled text block for embedding/RAG."""
@@ -106,11 +80,7 @@ class SearchResult:
 
 @dataclass
 class ProductSearchBundle:
-    """
-    All real-time data gathered for one product in one place. This is
-    what gets handed off to embeddings/FAISS (Feature 8) and to the
-    comparison/reviews services.
-    """
+    """All real-time data gathered for one product in one place."""
     product_name: str
     general_info: List[SearchResult] = field(default_factory=list)
     prices_by_retailer: Dict[str, List[SearchResult]] = field(default_factory=dict)
@@ -118,10 +88,7 @@ class ProductSearchBundle:
     similar_products: List[SearchResult] = field(default_factory=list)
 
     def to_corpus_text(self) -> str:
-        """
-        Flatten every gathered result into one text corpus, ready to be
-        chunked and embedded for FAISS retrieval.
-        """
+        """Flatten every gathered result into one text corpus for FAISS embedding."""
         blocks: List[str] = []
         for result in self.general_info:
             blocks.append(result.to_text())
@@ -140,24 +107,22 @@ class SearchService:
     """
     Wrapper around the Tavily Search API for all real-time product
     research needs of the app.
-
-    Usage:
-        search = SearchService()
-        bundle = search.build_product_bundle("Apple iPhone 15 Smartphone")
     """
 
     def __init__(self, max_results: int = MAX_SEARCH_RESULTS) -> None:
-        if not TAVILY_API_KEY or TAVILY_API_KEY == "your_tavily_api_key_here":
+        self._ensure_api_key()
+        self.max_results = max_results
+        self._cache: Dict[Tuple[str, Tuple[str, ...], int], List[SearchResult]] = {}
+
+    @staticmethod
+    def _ensure_api_key() -> None:
+        """Fail fast with a clear message if no API key is configured at runtime."""
+        api_key = get_tavily_api_key()
+        if not api_key or api_key == "your_tavily_api_key_here":
             raise SearchServiceError(
                 "TAVILY_API_KEY is missing or unset. Add a valid key to "
-                "your .env file (TAVILY_API_KEY=...) before using SearchService."
+                "your Streamlit Secrets or .env file before using SearchService."
             )
-        self.max_results = max_results
-
-        # Simple in-memory cache: (query, sorted include_domains, max_results) -> results.
-        # Keeps the app snappy when the same product/question is searched
-        # more than once in a session, without needing an external cache.
-        self._cache: Dict[Tuple[str, Tuple[str, ...], int], List[SearchResult]] = {}
 
     # -----------------------------------------------------
     # Low-level search primitive
@@ -176,6 +141,9 @@ class SearchService:
         include_domains: Optional[List[str]] = None,
         topic: str = "general",
     ) -> List[SearchResult]:
+        self._ensure_api_key()
+        api_key = get_tavily_api_key()
+        
         effective_max = max_results or self.max_results
         cache_key = self._cache_key(query, effective_max, include_domains)
 
@@ -185,7 +153,7 @@ class SearchService:
             return cached
 
         payload = {
-            "api_key": TAVILY_API_KEY,
+            "api_key": api_key,
             "query": query,
             "topic": topic,
             "search_depth": "basic",
@@ -201,21 +169,14 @@ class SearchService:
                 json=payload,
                 timeout=15,
             )
-
             response.raise_for_status()
-
             data = response.json()
-
         except requests.exceptions.Timeout:
-            raise SearchServiceError(
-                "Tavily timeout. Please try again."
-            )
-
+            raise SearchServiceError("Tavily timeout. Please try again.")
         except Exception as e:
             raise SearchServiceError(str(e))
 
         results = []
-
         for item in data.get("results", []):
             results.append(
                 SearchResult(
@@ -226,14 +187,9 @@ class SearchService:
                 )
             )
 
-        # Global accessory filter: no matter which higher-level method
-        # called us, accessory listings (covers, cases, chargers, cables,
-        # etc.) never make it into the app's data.
         results = filter_accessory_results(results)
 
         if len(self._cache) >= MAX_CACHE_ENTRIES:
-            # Cheap eviction: drop an arbitrary (oldest-inserted, in
-            # practice) entry rather than pulling in a full LRU dependency.
             self._cache.pop(next(iter(self._cache)))
         self._cache[cache_key] = results
 
@@ -246,20 +202,7 @@ class SearchService:
     def search_prices_by_retailer(
         self, product_query: str
     ) -> Dict[str, List[SearchResult]]:
-        """
-        Search each configured retailer individually so price/availability
-        data is traceable back to a specific website (needed for the price
-        comparison table and "best deal" highlighting).
-
-        Retailers are queried in parallel (they're independent HTTP calls),
-        and the query itself is the concise product query as-is - no
-        "price buy online" filler - since `include_domains` already pins
-        each search to that retailer's own listing pages.
-
-        Returns:
-            Dict mapping retailer name -> list of SearchResult (usually 1-3
-            per retailer, since we only need the product listing page(s)).
-        """
+        """Search each configured retailer individually in parallel."""
         prices: Dict[str, List[SearchResult]] = {}
 
         def _search_retailer(retailer: str, domains: List[str]) -> Tuple[str, List[SearchResult]]:
@@ -271,8 +214,6 @@ class SearchService:
                     r.source = retailer
                 return retailer, results
             except SearchServiceError as exc:
-                # Don't let one retailer's failure break the whole comparison;
-                # log it and continue with an empty list for that retailer.
                 logger.warning("Price search failed for %s: %s", retailer, exc)
                 return retailer, []
 
@@ -292,18 +233,7 @@ class SearchService:
     # -----------------------------------------------------
 
     def search_reviews(self, product_query: str) -> List[SearchResult]:
-        """
-        Search for real customer reviews and expert opinions across the
-        web (not limited to retailer sites, since review/tech blogs often
-        have richer commentary).
-
-        Runs three complementary, concise queries in parallel and merges
-        the de-duplicated results, instead of relying on a single broad
-        query:
-            "<product> customer reviews"
-            "<product> pros cons"
-            "<product> expert review"
-        """
+        """Search for real customer reviews and expert opinions across the web."""
         queries = [
             f"{product_query} customer reviews",
             f"{product_query} pros cons",
@@ -338,13 +268,7 @@ class SearchService:
     def search_similar_products(
         self, product_query: str, category: Optional[str] = None
     ) -> List[SearchResult]:
-        """
-        Legacy similar-products search, kept as a safety-net fallback for
-        callers that don't have Gemini-generated suggestions on hand
-        (e.g. if suggest_similar_products() fails). Prefer
-        search_similar_products_by_suggestions() when possible - it
-        produces much more relevant, less noisy results.
-        """
+        """Legacy similar-products search, kept as a safety-net fallback."""
         category_hint = f" {category}" if category else ""
         query = f"best alternatives to {product_query}{category_hint} 2026"
         results = self._search(query)
@@ -357,30 +281,7 @@ class SearchService:
         suggestions: List[Dict[str, str]],
         category: Optional[str] = None,
     ) -> List[SearchResult]:
-        """
-        FEATURE 5 (improved): search the live web for each Gemini-suggested
-        similar product individually, rather than relying on a single
-        vague "best alternatives to X" query.
-
-        Each suggestion is turned into a concise, manually-built query
-        (Brand + Product Name + Category) and searched independently, in
-        parallel. Accessory results are already filtered out by
-        `_search()`. The single best (first, highest-scored) result per
-        suggested product is kept, so the "Similar Products" row shows one
-        card per real alternative product rather than a pile of
-        unrelated pages.
-
-        Args:
-            suggestions: Output of GeminiService.suggest_similar_products(),
-                i.e. a list of {"name": ..., "brand": ...} dicts.
-            category: The original product's category, reused for each
-                suggestion's query for relevance.
-
-        Returns:
-            A list of SearchResult, one per suggested product that
-            returned a usable, non-accessory listing. May be shorter than
-            `suggestions` if some searches failed or returned nothing.
-        """
+        """Search the live web for each Gemini-suggested similar product individually."""
         if not suggestions:
             return []
 
@@ -419,12 +320,7 @@ class SearchService:
     def search_budget_alternatives(
         self, category: str, max_price_inr: int
     ) -> List[SearchResult]:
-        """
-        Search for budget-friendly alternatives under a given price cap.
-
-        Example: search_budget_alternatives("laptops", 60000)
-                 -> "best laptops under 60000 rupees 2026"
-        """
+        """Search for budget-friendly alternatives under a given price cap."""
         query = f"best {category} under {max_price_inr} rupees 2026"
         results = self._search(query)
         for r in results:
@@ -435,60 +331,21 @@ class SearchService:
     # High-level orchestrator: build everything at once
     # -----------------------------------------------------
 
-    # FEATURE 1: General Product Search
-
     def search_product_details(self, product_query: str) -> List[SearchResult]:
-        """
-        Search product specifications, features, price and overview
-        using a concise, product-first query (no filler adjectives like
-        "latest original review" - see project requirement on search
-        quality).
-        """
-
+        """Search product specifications, features, price and overview."""
         query = f"{product_query} specifications features price"
-
         results = self._search(
             query=query,
             max_results=5,
         )
-
         for r in results:
             r.source = "general"
-
         return results
 
     def build_product_bundle(
         self, product_query: str, category: Optional[str] = None
     ) -> ProductSearchBundle:
-        """
-        Run all searches needed to fully populate the app for a given
-        identified product: general specs, retailer prices, reviews, and
-        a legacy similar-products fallback. This is the single entry
-        point app.py should call right after Gemini Vision identifies
-        the product and app.py builds the manual search query.
-
-        General info, retailer prices, and reviews are independent
-        Tavily calls, so they run in parallel via a thread pool rather
-        than sequentially - this is the main latency win for the
-        "Optimize Performance" requirement.
-
-        NOTE: `similar_products` here is populated with the legacy,
-        lower-quality search as a safe default. app.py immediately
-        overwrites it with the higher-quality, Gemini-suggestion-driven
-        results from search_similar_products_by_suggestions() when that
-        succeeds - this method's own similar-products call is only a
-        fallback if that improved flow fails.
-
-        Args:
-            product_query: The manually-built search query (Brand +
-                Product Name + Category - see utils.build_manual_search_query()),
-                NOT Gemini's raw `search_query` field.
-            category: Optional product category, improves similar-product
-                search relevance.
-
-        Returns:
-            A fully populated ProductSearchBundle.
-        """
+        """Run all searches needed to fully populate the bundle data."""
         logger.info("Building product search bundle for: %s", product_query)
 
         bundle = ProductSearchBundle(product_name=product_query)
