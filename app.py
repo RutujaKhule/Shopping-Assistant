@@ -22,20 +22,22 @@ This file is the ONLY orchestration point in the app — it calls into
 services/ and rag/ for all logic, and ui/components.py for all
 rendering. Nothing here talks to Gemini/Tavily/FAISS directly.
 """
-import hashlib
-import logging
-import os  
-import re
-from typing import Any, Dict, List, Optional
-
+# --- STREAMLIT SECRETS FIX (सबसे ऊपर होना चाहिए) ---
+import os
 import streamlit as st
-from PIL import Image
 
 if "GOOGLE_API_KEY" in st.secrets:
     os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
 if "TAVILY_API_KEY" in st.secrets:
     os.environ["TAVILY_API_KEY"] = st.secrets["TAVILY_API_KEY"]
+# --------------------------------------------------
 
+import hashlib
+import logging
+import re
+from typing import Any, Dict, List, Optional
+
+from PIL import Image
 
 from services.gemini import GeminiService, GeminiServiceError
 from services.search import SearchService, SearchServiceError
@@ -47,6 +49,9 @@ from rag.retrieval import RAGPipeline, ConversationMemory, RetrievalError
 
 from ui import components as ui
 from utils import build_manual_search_query
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
