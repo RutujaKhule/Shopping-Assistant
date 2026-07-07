@@ -23,20 +23,36 @@ services/ and rag/ for all logic, and ui/components.py for all
 rendering. Nothing here talks to Gemini/Tavily/FAISS directly.
 """
 
+import os
 import streamlit as st
 from services.gemini import GeminiService
-
-@st.cache_resource
-def get_gemini_service():
-    return GeminiService()
-
-
-gemini = get_gemini_service()
+from services.search import SearchService
 
 if "GOOGLE_API_KEY" in st.secrets:
     os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
 if "TAVILY_API_KEY" in st.secrets:
     os.environ["TAVILY_API_KEY"] = st.secrets["TAVILY_API_KEY"]
+
+ीं
+google_key = os.environ.get("GOOGLE_API_KEY")
+tavily_key = os.environ.get("TAVILY_API_KEY")
+
+if not google_key or not tavily_key:
+    st.error("Setup error: GOOGLE_API_KEY or TAVILY_API_KEY is missing or unset. Please add them to your Streamlit Secrets.")
+    st.stop()
+
+@st.cache_resource
+def get_gemini_service():
+    return GeminiService()
+
+@st.cache_resource
+def get_search_service():
+    return SearchService()
+
+gemini = get_gemini_service()
+search = get_search_service()
+
+# --------------------------------------------------
 # --------------------------------------------------
 
 import hashlib
