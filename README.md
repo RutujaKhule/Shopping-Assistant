@@ -5,6 +5,7 @@ retailers, an AI buying recommendation, a customer review summary, similar
 products, and a follow-up chatbot — all grounded in live web search. No
 static datasets, no hardcoded product data.
 
+LIVE DEMO - https://shopping-assistant-6wdreks83r45dcktpxdswb.streamlit.app/
 ## How it works
 
 ```
