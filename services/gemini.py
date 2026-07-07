@@ -3,12 +3,7 @@ services/gemini.py
 =========================================================
 Gemini Service Layer
 =========================================================
-This module wraps all interactions with Google's Gemini models:
-
-1. Gemini Vision  -> identifies a product from an uploaded image
-2. Gemini Flash   -> general-purpose text generation
-
-Modified to dynamically fetch Streamlit Secrets at runtime.
+Modified with lazy initialization to prevent crashes during import on Streamlit Cloud.
 """
 
 import os
@@ -20,10 +15,6 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from PIL import Image
 import streamlit as st
-
-# -------------------------------------------------------
-# Setup
-# -------------------------------------------------------
 
 load_dotenv()
 
@@ -45,30 +36,21 @@ class GeminiServiceError(Exception):
 
 
 class GeminiService:
-    """
-    Thin, reusable wrapper around the Gemini SDK.
-
-    Usage:
-        gemini = GeminiService()
-        product_info = gemini.identify_product(image)
-        answer = gemini.generate_text("Summarize these reviews...")
-    """
+    """Thin, reusable wrapper around the Gemini SDK."""
 
     def __init__(
         self,
         vision_model_name: str = GEMINI_VISION_MODEL,
         text_model_name: str = GEMINI_TEXT_MODEL,
     ) -> None:
-        self._ensure_api_key()
         self.vision_model_name = vision_model_name
         self.text_model_name = text_model_name
+        # Initialize models lazily during actual method execution, not in __init__
+        self.vision_model = None
+        self.text_model = None
 
-        self.vision_model = genai.GenerativeModel(self.vision_model_name)
-        self.text_model = genai.GenerativeModel(self.text_model_name)
-
-    @staticmethod
-    def _ensure_api_key() -> None:
-        """Fail fast with a clear message if no API key is configured at runtime."""
+    def _ensure_api_key(self) -> None:
+        """Ensures the API key is configured and models are initialized right before call."""
         api_key = get_google_api_key()
         
         if not api_key or api_key == "your_google_gemini_api_key_here":
@@ -76,12 +58,12 @@ class GeminiService:
                 "GOOGLE_API_KEY is missing or unset. Add a valid key to your "
                 "Streamlit Secrets or .env file before using GeminiService."
             )
-        else:
-            genai.configure(api_key=api_key)
-
-    # -----------------------------------------------------
-    # FEATURE 1: Product Identification (Gemini Vision)
-    # -----------------------------------------------------
+        
+        genai.configure(api_key=api_key)
+        if self.vision_model is None:
+            self.vision_model = genai.GenerativeModel(self.vision_model_name)
+        if self.text_model is None:
+            self.text_model = genai.GenerativeModel(self.text_model_name)
 
     def identify_product(self, image: Image.Image) -> Dict[str, Any]:
         """Identify a product from an uploaded image using Gemini Vision."""
@@ -122,10 +104,6 @@ extra commentary) using exactly this schema:
             logger.exception("Gemini Vision call failed")
             raise GeminiServiceError(f"Product identification failed: {exc}") from exc
 
-    # -----------------------------------------------------
-    # FEATURE 5: Similar-product suggestions (structured JSON)
-    # -----------------------------------------------------
-
     def suggest_similar_products(
         self,
         product_name: str,
@@ -164,10 +142,6 @@ Respond with ONLY a valid JSON array using exactly this schema:
                 continue
             suggestions.append({"name": name, "brand": str(item.get("brand") or "").strip()})
         return suggestions[:count]
-
-    # -----------------------------------------------------
-    # Generic text generation (used by RAG, recommendations)
-    # -----------------------------------------------------
 
     def generate_text(
         self,
@@ -212,22 +186,14 @@ USER QUESTION:
 """
         return self.generate_text(prompt, system_instruction=system_instruction)
 
-    # -----------------------------------------------------
-    # Internal helpers
-    # -----------------------------------------------------
-
     @staticmethod
     def _extract_text(response: Any) -> str:
         try:
             text = response.text
         except Exception as exc:
-            raise GeminiServiceError(
-                f"Gemini returned no usable text: {exc}"
-            ) from exc
-
+            raise GeminiServiceError(f"Gemini returned no usable text: {exc}") from exc
         if not text or not text.strip():
             raise GeminiServiceError("Gemini returned an empty response.")
-
         return text.strip()
 
     @staticmethod
@@ -246,9 +212,7 @@ USER QUESTION:
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError as exc:
-            raise GeminiServiceError(
-                f"Could not parse response as JSON. Raw response: {raw_text[:300]}"
-            ) from exc
+            raise GeminiServiceError(f"Could not parse response as JSON: {raw_text[:300]}") from exc
 
     @staticmethod
     def parse_json_array_response(raw_text: str) -> List[Any]:
@@ -256,12 +220,7 @@ USER QUESTION:
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError as exc:
-            raise GeminiServiceError(
-                f"Could not parse response as a JSON array. Raw response: {raw_text[:300]}"
-            ) from exc
-
+            raise GeminiServiceError(f"Could not parse response as a JSON array: {raw_text[:300]}") from exc
         if not isinstance(data, list):
-            raise GeminiServiceError(
-                f"Expected a JSON array but got {type(data).__name__}"
-            )
+            raise GeminiServiceError(f"Expected a JSON array but got {type(data).__name__}")
         return data
