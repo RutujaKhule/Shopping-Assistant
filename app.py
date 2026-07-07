@@ -22,9 +22,16 @@ This file is the ONLY orchestration point in the app — it calls into
 services/ and rag/ for all logic, and ui/components.py for all
 rendering. Nothing here talks to Gemini/Tavily/FAISS directly.
 """
-# --- STREAMLIT SECRETS FIX (सबसे ऊपर होना चाहिए) ---
-import os
+
 import streamlit as st
+from services.gemini import GeminiService
+
+@st.cache_resource
+def get_gemini_service():
+    return GeminiService()
+
+
+gemini = get_gemini_service()
 
 if "GOOGLE_API_KEY" in st.secrets:
     os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
